@@ -1,105 +1,147 @@
 <!doctype html>
 <html lang="ja">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<link rel="manifest" href="manifest.webmanifest" />
-<title>manganame</title>
-<style>
-  :root{
-    --panel-border: 3px;     /* コマ枠の太さ */
-    --edge-thick: 2.5px;     /* 分割の黒線の太さ（両側） */
-    --pad-x: 14px;           /* セリフの左右パディング */
-    --pad-y: 12px;           /* セリフの上下パディング */
-    --ui-h: 46px;
-  }
-  html,body{margin:0;height:100%;background:#ececec;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Hiragino Sans","Noto Sans JP",sans-serif}
-  #topbar{
-    position:fixed;inset:0 0 auto 0;height:var(--ui-h);display:flex;gap:.5rem;
-    align-items:center;padding:6px 10px;background:#fff;border-bottom:1px solid #ddd;z-index:1000;
-  }
-  #pagebar{margin-left:auto;display:flex;gap:.5rem;align-items:center}
-  button,select,input[type="range"]{height:32px}
-  #sizeLabel{min-width:44px;display:inline-block;margin-left:6px}
-  #root{position:fixed;inset:var(--ui-h) 0 0 0;overflow:auto;}
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>manganame v3</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#ffffff">
+  <style>
+    :root{
+      --ui: #222;
+      --bg: #f0f0f3;
+      --paper: #fff;
+      --frame: #111;
+      --gutter: #fff;
+      --bubble: #000;
+      --active: #2f7af3;
+    }
+    *{box-sizing:border-box; user-select:none;}
+    html,body{height:100%;}
+    body{
+      margin:0; background:var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", "Yu Gothic", Meiryo, sans-serif;
+      color:#111; overflow:hidden;
+    }
 
-  /* ===== ページ ===== */
-  .page{
-    position:relative;margin:24px auto;background:#f9f9f9;
-    width:min(820px,calc(100% - 24px)); aspect-ratio:707/1000; /* B5相当比 */
-    outline:2px solid #ddd;
-  }
-  .page.active{outline:4px solid #3a8cff;} /* 有効ページの枠を太くして可視化 */
+    /* --- Toolbar --- */
+    .bar{
+      display:flex; align-items:center; gap:8px;
+      padding:8px; background:#fff; border-bottom:1px solid #ddd;
+      position:sticky; top:0; z-index:5;
+      white-space:nowrap; overflow:auto; scrollbar-width:none;
+    }
+    .bar::-webkit-scrollbar{display:none;}
+    button{
+      height:30px; padding:0 10px; border:1px solid #ccc; background:#fff; border-radius:6px;
+      font-size:14px; line-height:28px; cursor:pointer;
+    }
+    button:active{transform:translateY(1px);}
+    .toggled{background:#e9f2ff; border-color:#83b6ff; color:#1852b8;}
+    .ghost{opacity:.7}
+    .pxview{min-width:42px; text-align:right; font-variant-numeric:tabular-nums;}
 
-  /* ===== コマ ===== */
-  .panel{
-    position:absolute;background:#fff;border:var(--panel-border) solid #000;box-sizing:border-box;
-    overflow:visible;
-  }
+    .spacer{flex:1}
 
-  /* ===== 分割（白い溝 ＋ 両側の黒線 ＝ 二重線） ===== */
-  .gutter{position:absolute;pointer-events:none}
-  .gutter .gap{position:absolute;background:#fff}
-  .gutter .edge{position:absolute;background:#000}
+    /* --- Stage --- */
+    .wrap{display:flex; height:calc(100% - 48px);}
+    .stage{
+      flex:1; overflow:auto; display:flex; justify-content:center; align-items:flex-start;
+      padding:24px;
+    }
+    .page{
+      position:relative; width:860px; height:1220px; /* B5縦相当 */
+      background:var(--paper); border:6px solid transparent; box-shadow:0 1px 8px rgba(0,0,0,.08);
+    }
+    .page.active{ border-color:var(--active); }
+    .paper-frame{
+      position:absolute; inset:16px; border:3px solid var(--frame);
+    }
 
-  /* ===== セリフ（フキダシ） ===== */
-  .balloon{
-    position:absolute;background:#fff;border:2px solid #000;box-sizing:content-box;
-    padding:var(--pad-y) var(--pad-x);min-width:32px;min-height:32px;user-select:text;
-  }
-  .balloon .text{
-    outline:none;display:inline-block;white-space:pre; /* ★ 改行のみ反映（自動折返ししない） */
-    line-height:1.25;
-  }
-  .balloon.ellipse{border-radius:9999px}
-  .balloon.rect{border-radius:0}             /* ★ 直角の四角 */
-  .balloon.jaggy{
-    border-radius:0;
-    /* 簡易ギザギザ輪郭（見た目を分かりやすく） */
-    clip-path: polygon(
-      0% 0%, 95% 0%, 100% 15%, 85% 10%, 90% 25%, 75% 20%,
-      80% 35%, 65% 30%, 70% 45%, 55% 40%, 60% 55%, 45% 50%,
-      50% 65%, 35% 60%, 40% 75%, 25% 70%, 30% 85%, 15% 80%,
-      20% 95%, 0% 100%, 0% 0%
-    );
-  }
-  .balloon.selected{outline:3px solid #3a8cff;outline-offset:1px}
+    /* gutters are drawn on canvas export, but on editor we draw thin helper lines */
+    .gline{ position:absolute; left:16px; right:16px; height:2px; background:var(--frame); }
+    .gline.v{ width:2px; top:16px; bottom:16px; left:auto; background:var(--frame); }
 
-  /* shape パレット（選択時だけ表示） */
-  #shapeBar{
-    position:fixed;left:8px;bottom:8px;display:none;gap:.5rem;padding:6px;background:#fff;
-    border:1px solid #ddd;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.08);z-index:1100;
-  }
-  #shapeBar.show{display:flex}
-</style>
+    /* --- Bubble node --- */
+    .bubble{
+      position:absolute; min-width:24px; min-height:24px;
+      padding:10px 12px; transform:translate(-50%, -50%);
+      outline:1px dashed #bbb; border-radius:12px; background:transparent;
+      display:flex; align-items:center; justify-content:center;
+      cursor:text;
+    }
+    .bubble.selected{ outline:2px dashed #7aa7ff; }
+    .bubble .shape{ position:absolute; inset:0; }
+    .text{
+      position:relative; white-space:pre; /* 折返し禁止：改行はEnterのみ */
+      font-size:22px; line-height:1.4; color:#111; user-select:text; cursor:text;
+      font-feature-settings:"palt" 1;
+    }
+    /* shape look (only editor) */
+    .shape.ellipse{ border:3px solid var(--bubble); border-radius:999px; background:transparent; }
+    .shape.rect{ border:3px solid var(--bubble); border-radius:0; background:transparent; }
+    .shape.saw{ border:3px solid var(--bubble); border-radius:16px; background:transparent; clip-path:path("M0,18 L10,0 L20,18 L30,0 L40,18 L50,0 L60,18 L100%,18 L100%,calc(100% - 18) L90%,100% L80%,calc(100% - 18) L70%,100% L60%,calc(100% - 18) L0,calc(100% - 18) Z"); }
+
+    /* small panel when selecting bubble */
+    .selpanel{
+      position:absolute; display:flex; gap:6px; padding:6px; background:#fff; border:1px solid #ddd; border-radius:8px;
+      box-shadow:0 6px 16px rgba(0,0,0,.1);
+      transform:translate(-50%,-110%); z-index:3;
+    }
+    .selpanel button{height:28px; font-size:12px; padding:0 8px;}
+    .hidden{display:none;}
+
+    /* multi pages strip */
+    .pagestrip{
+      position:fixed; bottom:10px; left:50%; transform:translateX(-50%);
+      display:flex; gap:8px; z-index:6;
+    }
+    .thumb{
+      width:64px; height:90px; background:#fff; border:2px solid #d6d6d6; cursor:pointer;
+    }
+    .thumb.active{ border-color:var(--active); }
+  </style>
+
+  <!-- libs for ZIP (optional) -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
 <body>
-<div id="topbar">
-  <button id="addTextBtn" title="セリフモードのON/OFF">セリフ</button>
-  <button id="splitBtn"  title="コマ割りモードのON/OFF">コマ枠追加</button>
+  <div class="bar" id="toolbar">
+    <button id="btnText" title="セリフ">セリフ</button>
+    <button id="btnSplit" title="コマ枠">コマ枠</button>
 
-  <label style="display:flex;align-items:center;gap:.4rem;margin-left:8px">
-    文字サイズ
-    <input id="fontSize" type="range" min="12" max="48" step="1" />
-    <span id="sizeLabel"></span>
-  </label>
+    <div style="display:flex;align-items:center;gap:8px;margin-left:8px;">
+      <span>文字サイズ</span>
+      <input id="fontRange" type="range" min="12" max="40" value="22" />
+      <span class="pxview" id="pxview">22px</span>
+    </div>
 
-  <div id="pagebar">
-    <button id="addPrev">↑ページ追加</button>
-    <button id="addNext">↓ページ追加</button>
-    <button id="delPage">今のページ削除</button>
+    <div class="spacer"></div>
+
+    <button id="btnAddPrev" title="前にページ追加">p↑</button>
+    <button id="btnAddNext" title="後にページ追加">p↓</button>
+    <button id="btnDelPage"  title="このページを削除">p×</button>
+
+    <button id="btnCopy"  title="テキストコピー">テキストコピー</button>
+    <button id="btnPaste" title="テキストペースト">テキストペースト</button>
+
+    <button id="btnPng" title="PNG書き出し">PNG</button>
+    <button id="btnZip" title="全ページPNG（ZIP）">ZIP</button>
   </div>
-</div>
 
-<div id="root"></div>
+  <div class="wrap">
+    <div class="stage">
+      <div class="page active" id="page">
+        <div class="paper-frame"></div>
+        <!-- gutters (editor helper lines; actual export will draw real gutters) -->
+        <div id="gContainer"></div>
+      </div>
+    </div>
+  </div>
 
-<!-- セリフ選択時：形状切替パレット -->
-<div id="shapeBar">
-  <button data-shape="ellipse">楕円</button>
-  <button data-shape="rect">四角</button>
-  <button data-shape="jaggy">ギザギザ</button>
-</div>
+  <!-- page strip -->
+  <div class="pagestrip" id="pagestrip"></div>
 
-<script src="app.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

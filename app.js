@@ -1,359 +1,597 @@
-/* ===== 設定 ===== */
-const DEFAULT_FONT_PX = 22;    // ★ デフォルト少し大きめ
-const EDGE_THICK = 2.5;        // 分割両側の黒線太さ
-const GUTTER_W_HORZ = 16;      // 横線の白帯幅（広め）
-const GUTTER_W_VERT = 8;       // 縦線の白帯幅（狭め）
-const STORAGE_KEY = 'manganame_v1';
+/* =======================================================
+   manga name board v3  (rebuild on v1 concept)
+   - セリフ：トグル、Enter改行のみ、内容に合わせて自動フィット
+   - コマ枠分割：角度を決めて指を離したら、対象コマ内で端まで自動延長（0°/90°にスナップ）
+   - p↑ / p↓ / p× ：ページ操作
+   - テキストコピー / テキストペースト（空行1=フキダシ, 空行2+=ページ）
+   - PNG書き出し（Canvas）、全ページZIP（jszip）
+   - データは localStorage に保存
+   ======================================================= */
 
-const root = document.getElementById('root');
-const addTextBtn = document.getElementById('addTextBtn');
-const splitBtn = document.getElementById('splitBtn');
-const fontRange = document.getElementById('fontSize');
-const sizeLabel = document.getElementById('sizeLabel');
-const addPrev = document.getElementById('addPrev');
-const addNext = document.getElementById('addNext');
-const delPage = document.getElementById('delPage');
-const shapeBar = document.getElementById('shapeBar');
+(() => {
+  const LSKEY = "manganame_v3";
+  const el = s => document.querySelector(s);
+  const els = s => document.querySelectorAll(s);
 
-fontRange.value = DEFAULT_FONT_PX;
-sizeLabel.textContent = DEFAULT_FONT_PX + 'px';
+  // ---- State ------------------------------------------------
+  const state = {
+    pages: [],       // [{bubbles:[], gutters:[], frame:{x,y,w,h}}]
+    pageIndex: 0,
+    mode: null,      // 'text' | 'split' | null
+    fontSize: 22,
+  };
 
-let state = load() ?? createInitialState();
-let currentPageIndex = Math.min(state.pages.length-1, state.currentPage ?? 0);
-let mode = null; // 'text' or 'split' or null
-let selectedBalloon = null;
-let splitDrag = null; // {panelId, start:{x,y}}
+  // ---- Init -------------------------------------------------
+  const pageEl = el('#page');
+  const gutterContainer = el('#gContainer');
 
-renderAll();
+  const btnText  = el('#btnText');
+  const btnSplit = el('#btnSplit');
+  const fontRange = el('#fontRange');
+  const pxview = el('#pxview');
 
-/* ====== イベント ====== */
-addTextBtn.addEventListener('click', () => {
-  mode = (mode === 'text') ? null : 'text';
-  addTextBtn.classList.toggle('active', mode==='text');
-  splitBtn.classList.remove('active');
-});
-splitBtn.addEventListener('click', () => {
-  mode = (mode === 'split') ? null : 'split';
-  splitBtn.classList.toggle('active', mode==='split');
-  addTextBtn.classList.remove('active');
-});
+  const btnAddPrev = el('#btnAddPrev');
+  const btnAddNext = el('#btnAddNext');
+  const btnDelPage = el('#btnDelPage');
 
-fontRange.addEventListener('input', ()=>{
-  sizeLabel.textContent = fontRange.value + 'px';
-  if (selectedBalloon){
-    selectedBalloon.style.fontSize = fontRange.value + 'px';
-    autosizeBalloon(selectedBalloon);
-    save();
+  const btnCopy = el('#btnCopy');
+  const btnPaste = el('#btnPaste');
+  const btnPng = el('#btnPng');
+  const btnZip = el('#btnZip');
+
+  // helpers
+  function load(){
+    try{
+      const raw = localStorage.getItem(LSKEY);
+      if(raw){
+        Object.assign(state, JSON.parse(raw));
+      }
+    }catch(e){}
+    if(!state.pages || !state.pages.length){
+      state.pages = [newPage()];
+    }
+    state.pageIndex = Math.min(state.pageIndex||0, state.pages.length-1);
+    state.mode = null;
+    state.fontSize = state.fontSize || 22;
   }
-});
+  function save(){
+    localStorage.setItem(LSKEY, JSON.stringify({
+      pages: state.pages, pageIndex: state.pageIndex, fontSize: state.fontSize
+    }));
+  }
+  function newPage(){
+    const frame = innerFrameRect();
+    return { bubbles: [], gutters: [], frame, id: nid() };
+  }
+  function nid(){ return Math.random().toString(36).slice(2,10); }
+  function innerFrameRect(){
+    const r = pageEl.getBoundingClientRect();
+    // editor frame inset = 16px border + 3px frame
+    const pad = 16 + 3;
+    return { x: pad, y: pad, w: r.width - pad*2, h: r.height - pad*2 };
+  }
 
-addPrev.addEventListener('click', ()=>{
-  insertPage(currentPageIndex);
-});
-addNext.addEventListener('click', ()=>{
-  insertPage(currentPageIndex+1);
-});
-delPage.addEventListener('click', ()=>{
-  if (state.pages.length<=1) return;
-  state.pages.splice(currentPageIndex,1);
-  currentPageIndex = Math.max(0, currentPageIndex-1);
-  save(); renderAll();
-});
+  // ---- Rendering -------------------------------------------
+  function render(){
+    // page active border
+    pageEl.classList.add('active');
+    gutterContainer.innerHTML = '';
+    // bubbles
+    pageEl.querySelectorAll('.bubble').forEach(n=>n.remove());
+    const page = state.pages[state.pageIndex];
 
-/* shape 切替 */
-shapeBar.addEventListener('click', (e)=>{
-  const b = e.target.closest('button[data-shape]');
-  if (!b || !selectedBalloon) return;
-  const s = b.dataset.shape;
-  selectedBalloon.classList.remove('ellipse','rect','jaggy');
-  selectedBalloon.classList.add(s);
-  autosizeBalloon(selectedBalloon);
-  save();
-});
-
-/* ====== レンダリング ====== */
-function renderAll(){
-  root.innerHTML = '';
-  state.pages.forEach((page,pi)=>{
-    const pageEl = document.createElement('div');
-    pageEl.className = 'page' + (pi===currentPageIndex?' active':'');
-    page.dom = pageEl;
-
-    // 1ページ＝複数パネル（初期は1つで全域）
-    page.panels.forEach(p=>{
-      const panelEl = document.createElement('div');
-      panelEl.className = 'panel';
-      panelEl.style.left = p.x+'px';
-      panelEl.style.top  = p.y+'px';
-      panelEl.style.width  = p.w+'px';
-      panelEl.style.height = p.h+'px';
-      p.dom = panelEl;
-
-      // 分割（白帯+両側線）
-      drawSplits(p);
-
-      // セリフ
-      p.balloons?.forEach(b=>{
-        const el = createBalloonDom(b.x,b.y,b.shape,b.text,b.fontSize);
-        panelEl.appendChild(el);
-        b.dom = el;
-      });
-
-      // クリック挙動
-      panelEl.addEventListener('pointerdown', (ev)=>{
-        const rect = panelEl.getBoundingClientRect();
-        const x = ev.clientX - rect.left;
-        const y = ev.clientY - rect.top;
-
-        if (mode==='text'){
-          const b = createBalloonDom(x,y,'ellipse','',(fontRange.value|0));
-          (p.balloons ||= []).push({x,y,shape:'ellipse',text:'',fontSize:(fontRange.value|0)});
-          p.dom.appendChild(b);
-          autosizeBalloon(b);
-          select(b);
-          save();
-        }else if (mode==='split'){
-          splitDrag = { panelId: p.id, start:{x,y} };
-          window.addEventListener('pointermove', onSplitMove);
-          window.addEventListener('pointerup', onSplitUp, {once:true});
-        }else{
-          select(null);
-        }
-      });
-
-      pageEl.appendChild(panelEl);
+    // gutters (editor helper line)
+    page.gutters.forEach(g=>{
+      const div = document.createElement('div');
+      if(g.dir === 'h'){
+        div.className = 'gline';
+        div.style.top = `${g.pos}px`;
+      }else{
+        div.className = 'gline v';
+        div.style.left = `${g.pos}px`;
+      }
+      gutterContainer.appendChild(div);
     });
 
-    root.appendChild(pageEl);
-
-    // ページをクリックでアクティブ化
-    pageEl.addEventListener('click', ()=> {
-      currentPageIndex = pi; save(); renderAll();
+    // bubbles
+    page.bubbles.forEach(b=>{
+      const node = createBubbleNode(b);
+      pageEl.appendChild(node);
     });
+
+    // page strip
+    renderPageStrip();
+
+    pxview.textContent = `${state.fontSize}px`;
+    fontRange.value = state.fontSize;
+    save();
+  }
+
+  function renderPageStrip(){
+    const strip = el('#pagestrip');
+    strip.innerHTML = '';
+    state.pages.forEach((p,i)=>{
+      const t = document.createElement('div');
+      t.className = 'thumb' + (i===state.pageIndex?' active':'');
+      t.title = `p${i+1}`;
+      t.onclick = ()=>{state.pageIndex=i; render();}
+      strip.appendChild(t);
+    });
+  }
+
+  // ---- Bubble ----------------------------------------------
+  function createBubble(data, x, y){
+    const page = state.pages[state.pageIndex];
+    const b = {
+      id: nid(), x, y, w: 10, h: 10,
+      text: '', shape: 'ellipse', font: state.fontSize
+    };
+    page.bubbles.push(b);
+    return b;
+  }
+
+  function createBubbleNode(b){
+    const div = document.createElement('div');
+    div.className = 'bubble';
+    div.style.left = `${b.x}px`;
+    div.style.top  = `${b.y}px`;
+
+    const shape = document.createElement('div');
+    shape.className = `shape ${b.shape}`;
+    div.appendChild(shape);
+
+    const text = document.createElement('div');
+    text.className = 'text';
+    text.style.fontSize = `${b.font}px`;
+    text.contentEditable = true;
+    text.spellcheck = false;
+    text.innerText = b.text;
+    div.appendChild(text);
+
+    // selection panel
+    const panel = document.createElement('div');
+    panel.className = 'selpanel hidden';
+    panel.innerHTML = `
+      <button data-s="ellipse">楕円</button>
+      <button data-s="rect">四角</button>
+      <button data-s="saw">ギザ</button>
+      <button data-del="1" class="ghost">削除</button>
+    `;
+    div.appendChild(panel);
+
+    // event
+    div.addEventListener('pointerdown',(e)=>{
+      selectBubble(div, b, true);
+      e.stopPropagation();
+    });
+    text.addEventListener('input',()=>{
+      b.text = text.innerText;
+      b.font = state.fontSize;
+      fitBubble(div, b); save();
+    });
+    text.addEventListener('keydown',(e)=>{
+      // Esc で選択解除
+      if(e.key==='Escape'){ deselect(); }
+    });
+
+    // fit once
+    fitBubble(div, b);
+
+    // panel buttons
+    panel.querySelectorAll('button[data-s]').forEach(btn=>{
+      btn.onclick = (ev)=>{
+        b.shape = btn.dataset.s;
+        shape.className = `shape ${b.shape}`;
+        fitBubble(div, b); save(); ev.stopPropagation();
+      }
+    });
+    panel.querySelector('button[data-del]').onclick = (ev)=>{
+      const page = state.pages[state.pageIndex];
+      page.bubbles = page.bubbles.filter(x=>x.id!==b.id);
+      render(); ev.stopPropagation();
+    };
+
+    return div;
+  }
+
+  function selectBubble(node, b, withPanel=false){
+    deselect();
+    node.classList.add('selected');
+    if(withPanel){
+      const panel = node.querySelector('.selpanel');
+      panel.classList.remove('hidden');
+      positionPanel(node, panel);
+    }
+    currentSelection = { node, data:b };
+  }
+  function positionPanel(node, panel){
+    const rect = node.getBoundingClientRect();
+    const pr = pageEl.getBoundingClientRect();
+    panel.style.left = `${rect.left - pr.left + rect.width/2}px`;
+    panel.style.top  = `${rect.top - pr.top - 8}px`;
+  }
+  function deselect(){
+    pageEl.querySelectorAll('.bubble.selected').forEach(n=>{
+      n.classList.remove('selected');
+      const p = n.querySelector('.selpanel');
+      p && p.classList.add('hidden');
+    });
+    currentSelection = null;
+  }
+  let currentSelection = null;
+
+  // text size fit :  折返し無し → 各行の幅を測って bubble サイズを決定
+  function fitBubble(node, b){
+    const textEl = node.querySelector('.text');
+    const padX = 18, padY = 14;
+
+    const lines = (b.text||'').split('\n');
+    const cvs = fitBubble._cvs || (fitBubble._cvs = document.createElement('canvas'));
+    const ctx = cvs.getContext('2d');
+    ctx.font = `${b.font}px ${getComputedStyle(textEl).fontFamily}`;
+
+    let w = 0;
+    lines.forEach(line => w = Math.max(w, ctx.measureText(line||' ').width));
+    const h = Math.max(1, lines.length) * (b.font*1.4);
+
+    b.w = Math.ceil(w) + padX*2;
+    b.h = Math.ceil(h) + padY*2;
+
+    // apply to node
+    node.style.width  = `${b.w}px`;
+    node.style.height = `${b.h}px`;
+    textEl.style.fontSize = `${b.font}px`;
+  }
+
+  // ---- Split (gutters) -------------------------------------
+  // クリックした位置の「現在のコマ」を取得
+  function hitPanel(x, y){
+    const page = state.pages[state.pageIndex];
+    const F = page.frame;
+    // initial one frame split by gutters (horizontal & vertical)
+    // we'll just allow H/V gutters → rectangles grid
+    // Determine panel by scanning sorted lines.
+    const ys = [F.y, ...page.gutters.filter(g=>g.dir==='h').map(g=>g.pos), F.y+F.h].sort((a,b)=>a-b);
+    const xs = [F.x, ...page.gutters.filter(g=>g.dir==='v').map(g=>g.pos), F.x+F.w].sort((a,b)=>a-b);
+    let ix=-1, iy=-1;
+    for(let i=0;i<xs.length-1;i++){ if(x>=xs[i] && x<xs[i+1]){ ix=i; break; } }
+    for(let i=0;i<ys.length-1;i++){ if(y>=ys[i] && y<ys[i+1]){ iy=i; break; } }
+    if(ix<0||iy<0) return null;
+    return {x0: xs[ix], x1: xs[ix+1], y0: ys[iy], y1: ys[iy+1]};
+  }
+
+  function addGutter(x,y, angleRad){
+    const page = state.pages[state.pageIndex];
+    const pan = hitPanel(x,y);
+    if(!pan) return;
+
+    // snap
+    const deg = angleRad * 180/Math.PI;
+    const norm = ((deg%180)+180)%180; // 0..180
+    let dir = null;
+    if(norm <=15 || norm >=165){ dir='h'; }          // ~0°
+    else if(norm >=75 && norm <=105){ dir='v'; }     // ~90°
+    else{
+      // free: pick nearest axis
+      dir = (Math.abs(norm-90) < Math.abs(norm-0)) ? 'v' : 'h';
+    }
+
+    // place within this panel (extend to its borders)
+    if(dir==='h'){
+      const pos = clamp(y, pan.y0+20, pan.y1-20);
+      page.gutters.push({dir, pos: Math.round(pos)});
+    }else{
+      const pos = clamp(x, pan.x0+20, pan.x1-20);
+      page.gutters.push({dir, pos: Math.round(pos)});
+    }
+    render();
+  }
+  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+  // ---- Text copy/paste -------------------------------------
+  function exportText(){
+    const lines = [];
+    state.pages.forEach((p,pi)=>{
+      // page separator (except first)
+      if(pi>0) lines.push('');
+      // order: 右→左, 上→下
+      const arr = p.bubbles.slice().sort((a,b)=>{
+        if(Math.abs(a.y-b.y) < 30) return b.x - a.x;
+        return a.y - b.y;
+      });
+      arr.forEach((b, i)=>{
+        if(i>0) lines.push('');
+        lines.push(b.text||'');
+      })
+    });
+    return lines.join('\n');
+  }
+  function importText(text){
+    const pages = text.replace(/\r/g,'').split(/\n{2,}/); // 2つ以上の空行でページ区切り
+    const start = state.pageIndex;
+
+    for(let i=0;i<pages.length;i++){
+      const pg = pages[i];
+      if(i>0 && start+i >= state.pages.length) state.pages.push(newPage());
+      const target = state.pages[start+i];
+      // 1つの空行でバルーン区切り
+      const bubbles = pg.split(/\n{1}(?!\n)/);
+
+      // 自動配置（右上から左へ）
+      const F = target.frame;
+      const COL = 3, GAPX=100, GAPY=90;
+      let col = COL-1, row=0;
+      bubbles.forEach(str=>{
+        const x = F.x + F.w - 120 - col*GAPX;
+        const y = F.y + 100 + row*GAPY;
+        const b = {id:nid(), x, y, w:10, h:10, text:str||'', shape:'ellipse', font:state.fontSize};
+        target.bubbles.push(b);
+        col--; if(col<0){ col=COL-1; row++; }
+      });
+    }
+    render();
+  }
+
+  // ---- PNG Export ------------------------------------------
+  function drawPageToCanvas(page){
+    const r = pageEl.getBoundingClientRect();
+    const W = Math.round( r.width  * window.devicePixelRatio );
+    const H = Math.round( r.height * window.devicePixelRatio );
+
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+
+    // helpers
+    function scx(x){ return Math.round(x * window.devicePixelRatio); }
+    function scy(y){ return Math.round(y * window.devicePixelRatio); }
+
+    // background paper
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0,0,W,H);
+
+    const F = page.frame;
+    // frame border
+    ctx.lineWidth = 3*window.devicePixelRatio;
+    ctx.strokeStyle = '#111';
+    ctx.strokeRect(scx(F.x), scy(F.y), scx(F.w), scy(F.h));
+
+    // gutters (白帯 + 両側線)
+    page.gutters.forEach(g=>{
+      // gap width: 横>縦 （横=18、縦=9 くらい）
+      const base = 18, narrow = 9;
+      const w = (g.dir==='h') ? base : narrow;
+
+      if(g.dir==='h'){
+        const y = g.pos;
+        // white gap
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(scx(F.x), scy(y - w/2), scx(F.w), scy(w));
+        // lines
+        ctx.strokeStyle = '#111';
+        ctx.lineWidth = 2*window.devicePixelRatio;
+        ctx.beginPath();
+        ctx.moveTo(scx(F.x), scy(y - w/2));
+        ctx.lineTo(scx(F.x+F.w), scy(y - w/2));
+        ctx.moveTo(scx(F.x), scy(y + w/2));
+        ctx.lineTo(scx(F.x+F.w), scy(y + w/2));
+        ctx.stroke();
+      }else{
+        const x = g.pos;
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(scx(x - w/2), scy(F.y), scx(w), scy(F.h));
+        ctx.strokeStyle = '#111';
+        ctx.lineWidth = 2*window.devicePixelRatio;
+        ctx.beginPath();
+        ctx.moveTo(scx(x - w/2), scy(F.y));
+        ctx.lineTo(scx(x - w/2), scy(F.y+F.h));
+        ctx.moveTo(scx(x + w/2), scy(F.y));
+        ctx.lineTo(scx(x + w/2), scy(F.y+F.h));
+        ctx.stroke();
+      }
+    });
+
+    // bubbles
+    page.bubbles.forEach(b=>{
+      const x = b.x, y=b.y, w=b.w, h=b.h;
+      const rx = x - w/2, ry = y - h/2;
+
+      // shape
+      ctx.lineWidth = 3*window.devicePixelRatio;
+      ctx.strokeStyle = '#000';
+      ctx.fillStyle = 'transparent';
+
+      if(b.shape==='ellipse'){
+        ctx.beginPath();
+        ctx.ellipse(scx(x), scy(y), scx(w/2), scy(h/2), 0, 0, Math.PI*2);
+        ctx.stroke();
+      }else if(b.shape==='rect'){
+        ctx.strokeRect(scx(rx), scy(ry), scx(w), scy(h));
+      }else{ // saw (擬似：角丸)
+        const r = 16;
+        roundedRect(ctx, scx(rx), scy(ry), scx(w), scy(h), scx(r));
+        ctx.stroke();
+      }
+
+      // text (改行そのまま)
+      ctx.fillStyle = '#111';
+      ctx.font = `${b.font*window.devicePixelRatio}px ${getComputedStyle(document.body).fontFamily}`;
+      ctx.textBaseline = 'top';
+      const lines = (b.text||'').split('\n');
+      const lh = b.font*1.4;
+
+      const padX = 18, padY = 14;
+      let ty = ry + padY;
+      lines.forEach(line=>{
+        ctx.fillText(line, scx(rx + padX), scy(ty));
+        ty += lh;
+      });
+    });
+
+    return canvas;
+  }
+
+  function roundedRect(ctx,x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  async function exportPNGCurrent(){
+    const page = state.pages[state.pageIndex];
+    const canvas = drawPageToCanvas(page);
+
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/png', 0.92));
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `page_${state.pageIndex+1}.png`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function exportZIPAll(){
+    if(!window.JSZip){ alert('ZIPライブラリの読み込みに失敗しました。ネットワークをご確認ください。'); return; }
+    const zip = new JSZip();
+    for(let i=0;i<state.pages.length;i++){
+      const canvas = drawPageToCanvas(state.pages[i]);
+      const blob = await new Promise(res => canvas.toBlob(res, 'image/png', 0.92));
+      zip.file(`page_${String(i+1).padStart(2,'0')}.png`, blob);
+    }
+    const blob = await zip.generateAsync({type:'blob'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `pages_${new Date().toISOString().slice(0,10)}.zip`;
+    a.click(); URL.revokeObjectURL(url);
+  }
+
+  // ---- UI events -------------------------------------------
+  btnText.onclick = ()=>{
+    toggleMode('text', btnText);
+  };
+  btnSplit.onclick = ()=>{
+    toggleMode('split', btnSplit);
+  };
+  function toggleMode(name, btn){
+    if(state.mode===name){
+      state.mode=null; btn.classList.remove('toggled');
+    }else{
+      state.mode=name;
+      els('.bar button').forEach(b=>b.classList.remove('toggled'));
+      btn.classList.add('toggled');
+    }
+  }
+  // page pointer to add things
+  let dragInfo = null;
+  pageEl.addEventListener('pointerdown', (e)=>{
+    const rect = pageEl.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+
+    if(state.mode==='text'){
+      // within frame?
+      const F = state.pages[state.pageIndex].frame;
+      if(x<F.x || x>F.x+F.w || y<F.y || y>F.y+F.h) return;
+      const b = createBubble(x,y);
+      const node = createBubbleNode(b);
+      pageEl.appendChild(node);
+      selectBubble(node, b, true);
+      // focus text
+      setTimeout(()=> node.querySelector('.text').focus(), 0);
+      save();
+      return;
+    }
+    if(state.mode==='split'){
+      dragInfo = {x0:x, y0:y};
+    }else{
+      deselect();
+    }
   });
-}
-
-/* ====== スプリット描画 ====== */
-function drawSplits(panel){
-  // 既存のgutter を消す
-  panel.dom.querySelectorAll('.gutter').forEach(e=>e.remove());
-  (panel.splits||[]).forEach(s=>{
-    const g = document.createElement('div'); g.className='gutter';
-
-    // スナップ済みの角度
-    const rad = s.rad;
-    const len = Math.hypot(s.p2.x - s.p1.x, s.p2.y - s.p1.y);
-    const gw = s.gw;
-
-    g.style.left = Math.min(s.p1.x, s.p2.x) + 'px';
-    g.style.top  = Math.min(s.p1.y, s.p2.y) + 'px';
-    g.style.width  = len + 'px';
-    g.style.height = gw + EDGE_THICK*2 + 'px';
-    g.style.transformOrigin = '0 50%';
-    g.style.transform = `translate(${s.p1.x}px,${s.p1.y}px) rotate(${rad}rad)`;
-
-    // 白帯
-    const gap = document.createElement('div');
-    gap.className='gap';
-    gap.style.left='0'; gap.style.top=EDGE_THICK+'px';
-    gap.style.width=len+'px'; gap.style.height=gw+'px';
-
-    // 両側の黒線
-    const e1 = document.createElement('div');
-    e1.className='edge';
-    e1.style.left='0'; e1.style.top='0';
-    e1.style.width=len+'px'; e1.style.height=EDGE_THICK+'px';
-
-    const e2 = document.createElement('div');
-    e2.className='edge';
-    e2.style.left='0'; e2.style.bottom='0';
-    e2.style.width=len+'px'; e2.style.height=EDGE_THICK+'px';
-
-    g.appendChild(gap); g.appendChild(e1); g.appendChild(e2);
-    panel.dom.appendChild(g);
+  pageEl.addEventListener('pointermove', (e)=>{
+    // show ghost? keep simple
   });
-}
+  pageEl.addEventListener('pointerup', (e)=>{
+    if(state.mode==='split' && dragInfo){
+      const rect = pageEl.getBoundingClientRect();
+      const x = e.clientX - rect.left, y = e.clientY - rect.top;
+      const dx = x - dragInfo.x0, dy = y - dragInfo.y0;
+      const angle = Math.atan2(dy, dx);
+      addGutter(dragInfo.x0, dragInfo.y0, angle);
+      dragInfo = null;
+      // keep split mode toggled on
+    }
+  });
 
-/* ====== 分割ドラッグ ====== */
-function onSplitMove(ev){
-  if (!splitDrag) return;
-  const panel = findPanel(splitDrag.panelId);
-  const rect = panel.dom.getBoundingClientRect();
-  const p2 = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
-
-  // 角度＆スナップ
-  let rad = Math.atan2(p2.y - splitDrag.start.y, p2.x - splitDrag.start.x);
-  const deg = Math.abs(rad*180/Math.PI);
-  if (deg < 15 || deg > 165) rad = 0;
-  else if (Math.abs(deg-90) < 15) rad = Math.PI/2;
-
-  splitDrag.preview = {p2,rad};
-  // 簡易プレビューは省略（確定時に描画）
-}
-
-function onSplitUp(ev){
-  const drag = splitDrag; splitDrag = null;
-  window.removeEventListener('pointermove', onSplitMove);
-
-  if (!drag?.preview) return;
-  const panel = findPanel(drag.panelId);
-  const p1 = drag.start, p2 = drag.preview.p2;
-  const rad = drag.preview.rad;
-
-  const gw = angleToGutterWidth(rad);
-  (panel.splits ||= []).push({p1,p2,rad,gw});
-  drawSplits(panel);
-  save();
-}
-
-/* 横広く / 縦狭く の幅を線形補間 */
-function angleToGutterWidth(rad){
-  const a = Math.abs((rad % Math.PI + Math.PI) % Math.PI);     // [0,π)
-  const n = a > Math.PI/2 ? Math.PI - a : a;                    // 0~π/2
-  const t = n / (Math.PI/2);                                    // 0=横,1=縦
-  return GUTTER_W_HORZ*(1-t) + GUTTER_W_VERT*t;
-}
-
-/* ====== セリフ生成 ====== */
-function createBalloonDom(x,y,shape='ellipse',text='',fontSize=DEFAULT_FONT_PX){
-  const b = document.createElement('div');
-  b.className = `balloon ${shape}`;
-  b.style.left = x+'px';
-  b.style.top  = y+'px';
-  b.style.fontSize = fontSize+'px';
-
-  const t = document.createElement('div');
-  t.className = 'text';
-  t.contentEditable = 'true';
-  t.textContent = text;
-  b.appendChild(t);
-
-  t.addEventListener('input', ()=>{
-    autosizeBalloon(b);
+  // font slider
+  fontRange.addEventListener('input', ()=>{
+    state.fontSize = Number(fontRange.value);
+    pxview.textContent = `${state.fontSize}px`;
+    // selected bubbleの即時反映
+    if(currentSelection){
+      currentSelection.data.font = state.fontSize;
+      fitBubble(currentSelection.node, currentSelection.data);
+    }
     save();
   });
-  t.addEventListener('blur', ()=>{
-    if (t.textContent===''){ b.remove(); save(); }
+
+  // page ops
+  btnAddPrev.onclick = ()=>{
+    state.pages.splice(state.pageIndex, 0, newPage());
+    render();
+  };
+  btnAddNext.onclick = ()=>{
+    state.pages.splice(state.pageIndex+1, 0, newPage());
+    state.pageIndex++;
+    render();
+  };
+  btnDelPage.onclick = ()=>{
+    if(!confirm('このページを削除しますか？')) return;
+    if(state.pages.length===1){ state.pages[0]=newPage(); }
+    else{
+      state.pages.splice(state.pageIndex,1);
+      state.pageIndex = Math.max(0, state.pageIndex-1);
+    }
+    render();
+  };
+
+  // text copy/paste
+  btnCopy.onclick = ()=>{
+    const t = exportText();
+    navigator.clipboard.writeText(t).then(()=>{
+      btnCopy.classList.add('toggled'); setTimeout(()=>btnCopy.classList.remove('toggled'),600);
+    });
+  };
+  btnPaste.onclick = async ()=>{
+    try{
+      const t = await navigator.clipboard.readText();
+      if(!t){ alert('クリップボードが空です'); return; }
+      importText(t); save();
+    }catch(e){
+      const t = prompt('貼り付けるテキストを入力（空行1=フキダシ、空行2+=ページ）');
+      if(t){ importText(t); save(); }
+    }
+  };
+
+  // png / zip
+  btnPng.onclick = exportPNGCurrent;
+  btnZip.onclick = exportZIPAll;
+
+  // deselect when clicking outside
+  document.addEventListener('pointerdown',(e)=>{
+    if(!pageEl.contains(e.target)) deselect();
   });
 
-  b.addEventListener('pointerdown', (e)=>{
-    e.stopPropagation();
-    select(b);
-  });
+  // ---- Boot -------------------------------------------------
+  load();
+  // adjust frame rect (size depends on css layout)
+  state.pages.forEach(p=> p.frame = innerFrameRect());
+  render();
 
-  autosizeBalloon(b);
-  return b;
-}
-
-/* ★ テキスト矩形に合わせてフキダシを完全フィット */
-function autosizeBalloon(b){
-  const txt = b.querySelector('.text');
-  // 改行のみを扱う
-  txt.style.whiteSpace = 'pre';
-  txt.style.display = 'inline-block';
-
-  const r = txt.getBoundingClientRect();
-  // padding は CSS から取得（px→数値）
-  const padX = parseFloat(getComputedStyle(b).paddingLeft);
-  const padY = parseFloat(getComputedStyle(b).paddingTop);
-
-  const w = Math.ceil(r.width)  + padX + padX + 1; // 最終行はみ出し対策で+1
-  const h = Math.ceil(r.height) + padY + padY + 1;
-
-  b.style.width  = w + 'px';
-  b.style.height = h + 'px';
-}
-
-/* 選択管理 */
-function select(el){
-  selectedBalloon?.classList.remove('selected');
-  selectedBalloon = el || null;
-  if (selectedBalloon){
-    selectedBalloon.classList.add('selected');
-    fontRange.value = parseInt(selectedBalloon.style.fontSize)||DEFAULT_FONT_PX;
-    sizeLabel.textContent = fontRange.value + 'px';
-    shapeBar.classList.add('show');
-  }else{
-    shapeBar.classList.remove('show');
+  // ---- SW register -----------------------------------------
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('./sw.js');
   }
-}
-
-/* ====== 状態管理 ====== */
-function createInitialState(){
-  // ページサイズは .page の実寸を使って後で合わせる。ここでは%ベースにしておき、
-  // 初回レンダ時に実DOMの幅高さからpxに直す。
-  const tmp = document.createElement('div');
-  tmp.className='page'; tmp.style.visibility='hidden'; document.body.appendChild(tmp);
-  const w = tmp.getBoundingClientRect().width, h = tmp.getBoundingClientRect().height;
-  tmp.remove();
-
-  return {
-    currentPage: 0,
-    pages: [{
-      panels: [{
-        id: 'p0',
-        x: 8, y: 8, w: w-16, h: h-16,
-        splits: [],
-        balloons: []
-      }]
-    }]
-  };
-}
-
-function insertPage(index){
-  // 既存ページのサイズ参照
-  const ref = document.querySelector('.page') || document.createElement('div');
-  ref.className='page';
-  ref.style.visibility='hidden'; document.body.appendChild(ref);
-  const w = ref.getBoundingClientRect().width, h = ref.getBoundingClientRect().height;
-  ref.remove();
-
-  const id = 'p' + Math.random().toString(36).slice(2,8);
-  const page = { panels:[{ id, x:8, y:8, w:w-16, h:h-16, splits:[], balloons:[] }] };
-  state.pages.splice(index,0,page);
-  currentPageIndex = index;
-  save(); renderAll();
-}
-
-function findPanel(id){
-  const page = state.pages[currentPageIndex];
-  return page.panels.find(p=>p.id===id);
-}
-
-function toSerializable(){
-  // DOM情報を除いて保存
-  return {
-    currentPage: currentPageIndex,
-    pages: state.pages.map(pg=>({
-      panels: pg.panels.map(p=>({
-        id:p.id,x:p.x,y:p.y,w:p.w,h:p.h,
-        splits:(p.splits||[]).map(s=>({p1:s.p1,p2:s.p2,rad:s.rad,gw:s.gw})),
-        balloons:(p.balloons||[]).map(b=>{
-          // DOMからテキスト・位置・shape・fontSize を復元
-          const dom = b.dom;
-          let x=b.x, y=b.y, text=b.text, shape=b.shape, fontSize=b.fontSize;
-          if (dom){
-            const t = dom.querySelector('.text');
-            text = t.textContent;
-            shape = dom.classList.contains('rect') ? 'rect'
-                   : dom.classList.contains('jaggy') ? 'jaggy' : 'ellipse';
-            fontSize = parseInt(dom.style.fontSize)||DEFAULT_FONT_PX;
-            x = parseFloat(dom.style.left); y = parseFloat(dom.style.top);
-          }
-          return {x,y,text,shape,fontSize};
-        })
-      }))
-    }))
-  };
-}
-function save(){
-  try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSerializable()));
-  }catch(e){ console.warn(e); }
-}
-function load(){
-  try{
-    const s = localStorage.getItem(STORAGE_KEY);
-    return s ? JSON.parse(s) : null;
-  }catch(e){ return null; }
-}
+})();
